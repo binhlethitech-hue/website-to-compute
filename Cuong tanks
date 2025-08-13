@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Demo Game 3D - Three.js</title>
+<style>
+  body { margin:0; overflow:hidden; background:#222; font-family: Arial, Helvetica, sans-serif; }
+  canvas { display:block; }
+  #ui {
+    position: absolute; left: 12px; top: 12px; color: #fff;
+    background: rgba(0,0,0,0.35); padding:10px 12px; border-radius:8px;
+    font-size:14px;
+  }
+  #hud { position: absolute; right: 12px; top: 12px; color:#fff; background: rgba(0,0,0,0.35); padding:8px 12px; border-radius:8px; }
+</style>
+</head>
+<body>
+
+<div id="ui">
+  <strong>Controls</strong>
+  <div>W A S D : di chuyển</div>
+  <div>Shift : chạy</div>
+  <div>Space : nhảy</div>
+  <div>R : đặt lại vị trí</div>
+</div>
+<div id="hud">Vị trí: <span id="pos">0,0,0</span></div>
+
+<!-- Three.js CDN -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r152/three.min.js"></script>
+
+<script>
+/* === Setup cơ bản === */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb);
+
+const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 1000);
+camera.position.set(5, 6, 10);
+
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+/* === Lights === */
+const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+dirLight.position.set(5, 10, 5);
+dirLight.castShadow = true;
+dirLight.shadow.mapSize.set(2048,2048);
+dirLight.shadow.camera.left = -20; dirLight.shadow.camera.right = 20;
+dirLight.shadow.camera.top = 20; dirLight.shadow.camera.bottom = -20;
+dirLight.shadow.camera.near = 1; dirLight.shadow.camera.far = 50;
+scene.add(dirLight);
+
+const ambient = new THREE.AmbientLight(0xffffff, 0.35);
+scene.add(ambient);
+
+/* === Ground === */
+const groundGeo = new THREE.PlaneGeometry(100, 100);
+const groundMat = new THREE.MeshStandardMaterial({color:0x2e8b57});
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI/2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+/* grid helper */
+const grid = new THREE.GridHelper(100, 100, 0x444444, 0x2b2b2b);
+scene.add(grid);
+
+/* === Hero === */
+const heroGeo = new THREE.BoxGeometry(1,2,1);
+const heroMat = new THREE.MeshStandardMaterial({color:0xff4444});
+const hero = new THREE.Mesh(heroGeo, heroMat);
+hero.castShadow = true;
+hero.position.set(0,1,0);
+scene.add(hero);
+
+/* === Simple "feet" collider for ground check === */
+const feetRayOrigin = new THREE.Vector3();
+let canJump = false;
+
+/* === Obstacles === */
+const obstacles = [];
+function addBox(x,z,w=2,h=2,d=2,color=0x8b4513){
+  const g = new THREE.BoxGeometry(w,h,d);
+  const m = new THREE.MeshStandardMaterial({color});
+  const box = new THREE.Mesh(g,m);
+  box.position.set(x, h/2, z);
+  box.castShadow = true;
+  box.receiveShadow = true;
+  scene.add(box);
+  obstacles.push(box);
+}
+addBox(3, -3, 2,2,2, 0x8b0000);
+addBox(-4, 2, 3,3,3, 0x006400);
+addBox(0, -8, 4,1.5,2, 0x3333aa);
+addBox(6,4,2,4,2, 0x8844ff);
+
+/* === Movement state === */
+const keys = {};
+window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+let velocity = new THREE.Vector3();
+const moveSpeed = 5; // units per second
+const runMultiplier = 1.9;
+const gravity = -20;
+const jumpSpeed = 8;
+
+/* === Clock for deltaTime === */
+const clock = new THREE.Clock();
+
+/* === Basic collision: AABB (hero is box) - simple pushback === */
+function resolveCollisions() {
+  // hero AABB
+  const hx = hero.position.x;
+  const hy = hero.position.y;
+  const hz = hero.position.z;
+  const hw = 0.5, hh = 1, hd = 0.5;
+
+  for (let b of obstacles) {
+    const bx = b.position.x, by = b.position.y, bz = b.position.z;
+    const bw = b.geometry.parameters.width/2 || 1;
+    const bh = b.geometry.parameters.height/2 || 1;
+    const bd = b.geometry.parameters.depth/2 || 1;
+
+    // check overlap on each axis
+    const dx = hx - bx;
+    const px = (hw + bw) - Math.abs(dx);
+    if (px <= 0) continue;
+    const dz = hz - bz;
+    const pz = (hd + bd) - Math.abs(dz);
+    if (pz <= 0) continue;
+    const dy = hy - by;
+    const py = (hh + bh) - Math.abs(dy);
+    if (py <= 0) continue;
+
+    // collision -- push out along smallest penetration axis
+    if (px < pz && px < py) {
+      hero.position.x += dx < 0 ? -px : px;
+      velocity.x = 0;
+    } else if (pz < px && pz < py) {
+      hero.position.z += dz < 0 ? -pz : pz;
+      velocity.z = 0;
+    } else {
+      hero.position.y += dy < 0 ? -py : py;
+      velocity.y = 0;
+    }
+  }
+}
+
+/* === Move hero === */
+function updateMovement(dt) {
+  // read input
+  let inputX = 0, inputZ = 0;
+  if (keys['w']) inputZ -= 1;
+  if (keys['s']) inputZ += 1;
+  if (keys['a']) inputX -= 1;
+  if (keys['d']) inputX += 1;
+
+  // normalize
+  const len = Math.hypot(inputX, inputZ);
+  if (len > 0) {
+    inputX /= len; inputZ /= len;
+  }
+
+  const running = !!keys['shift'];
+  const speed = moveSpeed * (running ? runMultiplier : 1);
+
+  // movement in world space (camera-independent for simplicity)
+  const targetVelX = inputX * speed;
+  const targetVelZ = inputZ * speed;
+
+  // smooth accelerate
+  const accel = 20;
+  velocity.x += (targetVelX - velocity.x) * Math.min(1, accel * dt);
+  velocity.z += (targetVelZ - velocity.z) * Math.min(1, accel * dt);
+
+  // gravity
+  velocity.y += gravity * dt;
+
+  // jump
+  // determine if on ground via ray
+  feetRayOrigin.copy(hero.position);
+  feetRayOrigin.y -= 1.01;
+  const raycaster = new THREE.Raycaster(hero.position, new THREE.Vector3(0,-1,0), 0, 1.05);
+  const intersects = raycaster.intersectObject(ground, true);
+  canJump = intersects.length > 0;
+
+  if (keys[' '] && canJump) {
+    velocity.y = jumpSpeed;
+    canJump = false;
+  }
+
+  // integrate
+  hero.position.x += velocity.x * dt;
+  hero.position.y += velocity.y * dt;
+  hero.position.z += velocity.z * dt;
+
+  // simple ground clamp
+  if (hero.position.y < 1) {
+    hero.position.y = 1;
+    velocity.y = 0;
+  }
+
+  // collisions with obstacles
+  resolveCollisions();
+}
+
+/* === Camera follow with smoothing === */
+const camOffset = new THREE.Vector3(6, 5, 8);
+const camLookOffset = new THREE.Vector3(0,1,0);
+function updateCamera(dt) {
+  const desiredPos = new THREE.Vector3().copy(hero.position).add(camOffset);
+  // smooth lerp
+  camera.position.lerp(desiredPos, Math.min(1, 5 * dt));
+  const lookAt = new THREE.Vector3().copy(hero.position).add(camLookOffset);
+  camera.lookAt(lookAt);
+}
+
+/* === HUD update === */
+const posSpan = document.getElementById('pos');
+
+/* === Reset function === */
+function resetHero() {
+  hero.position.set(0,1,0);
+  velocity.set(0,0,0);
+}
+
+/* === Key for reset */
+window.addEventListener('keydown', (e) => {
+  if (e.key.toLowerCase() === 'r') resetHero();
+});
+
+/* === Animation loop === */
+function animate() {
+  const dt = Math.min(0.05, clock.getDelta());
+  updateMovement(dt);
+  updateCamera(dt);
+  posSpan.innerText = `${hero.position.x.toFixed(2)}, ${hero.position.y.toFixed(2)}, ${hero.position.z.toFixed(2)}`;
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+animate();
+
+/* === Handle resize === */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
